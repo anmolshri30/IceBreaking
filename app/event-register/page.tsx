@@ -6,10 +6,10 @@ import EventRegister from "@/components/events/EventRegister";
 
 export const metadata: Metadata = {
   title: "Event Registration & Tournaments | VRGC VIT Bhopal",
-  description: "Browse available VRGC campus tournaments and register online.",
+  description: "Register for esports tournaments, VR gaming showcases, and campus events by VRGC at VIT Bhopal.",
 };
 
-export default function RegisterPage() {
+export default function EventRegisterPage() {
   return (
     <div className="relative min-h-screen flex flex-col bg-transparent text-slate-100 overflow-x-hidden">
       <VideoBackground />

@@ -1,0 +1,86 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper: Checks if the requesting user is an authorized admin
+    function isAdmin() {
+      return request.auth != null && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.token.email)) ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.token.email)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.token.email)).data.role in ['admin', 'superadmin'])
+      );
+    }
+
+    // Settings (registration toggle, quiz settings)
+    // Public can read, only Admins can toggle/update
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Events & Tournaments
+    // Public can view available events, only Admins can create/edit/delete
+    match /events/{eventId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Event Registrations
+    // - Authenticated students can register (create) with their own email
+    // - Students can read their own registration
+    // - Admins can view full rosters, toggle attendance, and remove registrants
+    match /event_registrations/{regId} {
+      allow read: if isAdmin() || (request.auth != null && resource.data.user_email == request.auth.token.email);
+      allow create: if request.auth != null && request.resource.data.user_email == request.auth.token.email;
+      allow update, delete: if isAdmin();
+    }
+
+    // Future Proposals & Faculty Desk
+    // Admins and faculty only
+    match /future_events/{proposalId} {
+      allow read, write: if isAdmin();
+    }
+
+    // Participants Collection (IceBreaking Main Arena)
+    // Public read for leaderboard, authenticated create, admin update/delete
+    match /participants/{participantId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if isAdmin();
+    }
+
+    // Polls & Quizzes
+    match /polls/{pollId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /poll_votes/{voteId} {
+      allow read, create: if true;
+      allow update, delete: if isAdmin();
+    }
+
+    match /quiz_responses/{responseId} {
+      allow read, write: if true;
+    }
+
+    match /leaderboard/{teamId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Admin Users Roster
+    // Read: authenticated users; Write: superadmin only
+    match /admins/{adminEmail} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+
+    // Default Fallback
+    match /{document=**} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}

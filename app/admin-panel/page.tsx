@@ -7,12 +7,35 @@ import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut, User } from "firebase/auth";
 import { checkIsAdmin, getAllAdmins, AdminUser } from "@/lib/adminAuth";
 import dynamic from "next/dynamic";
-import { collection, onSnapshot, doc } from "firebase/firestore";
+import { collection, onSnapshot, doc, query, where, updateDoc, deleteDoc, serverTimestamp } from "firebase/firestore";
 import Image from "next/image";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
-import { ChevronDown, ChevronRight, Search, Eye, EyeOff, Brain, Dices, UserCheck, Sparkles, Trash2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Search,
+  Eye,
+  EyeOff,
+  Brain,
+  Dices,
+  UserCheck,
+  Sparkles,
+  Trash2,
+  Download,
+  UserX,
+  CheckSquare,
+  Square,
+  Tag,
+  Clock,
+  Calendar,
+  Users,
+  X,
+  Plus,
+  Play,
+  Lock,
+} from "lucide-react";
 import { AnimatedGradientText } from "@/components/ui/animated-gradient-text";
 import { quizData, QuizQuestion } from "@/quizcontent/data";
 
@@ -26,7 +49,13 @@ const SeedDatabaseButton = dynamic(
   { ssr: false }
 );
 
+const PlannedEvents = dynamic(
+  () => import("@/components/events/PlannedEvents"),
+  { ssr: false }
+);
+
 const PAGE_SIZE = 25;
+const SEAT_LIMIT = 80;
 
 const BAR_GRADIENTS = [
   "from-violet-600 via-indigo-500 to-cyan-400",
@@ -44,6 +73,9 @@ interface EventItem {
   description?: string;
   date?: string;
   venue?: string;
+  location?: string;
+  fee?: number;
+  originalFee?: number;
   createdAt?: string;
 }
 
@@ -77,7 +109,7 @@ export default function AdminDashboardPage() {
   const [pollsList, setPollsList] = useState<any[]>([]);
   const [eventsList, setEventsList] = useState<EventItem[]>([]);
   const [activeTab, setActiveTab] = useState<
-    "overview" | "leaderboard" | "events" | "polls" | "quizzes" | "users" | "tools"
+    "overview" | "leaderboard" | "events" | "proposals" | "polls" | "quizzes" | "users" | "tools"
   >("overview");
 
   // Participant list pagination & search
@@ -104,12 +136,23 @@ export default function AdminDashboardPage() {
   const [eventModalOpen, setEventModalOpen] = useState(false);
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [eventTitle, setEventTitle] = useState("");
-  const [eventCategory, setEventCategory] = useState("Icebreaker Games");
+  const [eventCategory, setEventCategory] = useState("Esports Tournament");
   const [eventStatus, setEventStatus] = useState("live");
   const [eventDescription, setEventDescription] = useState("");
   const [eventVenue, setEventVenue] = useState("");
   const [eventDate, setEventDate] = useState("");
+  const [eventFee, setEventFee] = useState<string>("0");
+  const [eventOriginalFee, setEventOriginalFee] = useState<string>("100");
   const [isSavingEvent, setIsSavingEvent] = useState(false);
+
+  // Event Registration Desk State
+  const [registrationCounts, setRegistrationCounts] = useState<Record<string, number>>({});
+  const [adminPanelEventId, setAdminPanelEventId] = useState<string | null>(null);
+  const [adminRegistrants, setAdminRegistrants] = useState<Record<string, any[]>>({});
+  const [removingRegistrantId, setRemovingRegistrantId] = useState<string | null>(null);
+  const [togglingPresenceId, setTogglingPresenceId] = useState<string | null>(null);
+  const [registrantSearch, setRegistrantSearch] = useState<string>("");
+  const [presenceFilter, setPresenceFilter] = useState<"All" | "Present" | "Absent">("All");
 
   // Participant Edit & Delete State
   const [participantModalOpen, setParticipantModalOpen] = useState(false);
@@ -139,6 +182,8 @@ export default function AdminDashboardPage() {
     confirmLabel: "Delete",
     onConfirm: () => { },
   });
+
+  // Auth verification
 
   // Auth verification
   useEffect(() => {
@@ -226,6 +271,18 @@ export default function AdminDashboardPage() {
       setStats((s) => ({ ...s, totalTeams: snap.size }));
     });
 
+    // 8. Event Registrations Realtime Telemetry
+    const unsubEventRegs = onSnapshot(collection(db, "event_registrations"), (snap) => {
+      const counts: Record<string, number> = {};
+      snap.forEach((d) => {
+        const data = d.data();
+        const eid = data.event_id as string;
+        if (!eid) return;
+        counts[eid] = (counts[eid] || 0) + 1;
+      });
+      setRegistrationCounts(counts);
+    });
+
     // Admins
     getAllAdmins().then((admins) => {
       setAdminsList(admins);
@@ -240,8 +297,36 @@ export default function AdminDashboardPage() {
       unsubQuizToggle();
       unsubQuizResponses();
       unsubLeaderboard();
+      unsubEventRegs();
     };
   }, [isAdmin]);
+
+  // Admin Registrant Panel Real-time Listener
+  useEffect(() => {
+    if (!adminPanelEventId || !isAdmin) return;
+    const q = query(
+      collection(db, "event_registrations"),
+      where("event_id", "==", adminPanelEventId)
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      const list: any[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        list.push({
+          docId: d.id,
+          full_name: data.full_name || "",
+          user_email: data.user_email || "",
+          registration_number: data.registration_number || "",
+          phone: data.phone || "",
+          branch: data.branch || "",
+          registered_at: data.registered_at,
+          is_present: Boolean(data.is_present),
+        });
+      });
+      setAdminRegistrants((prev) => ({ ...prev, [adminPanelEventId]: list }));
+    });
+    return () => unsub();
+  }, [adminPanelEventId, isAdmin]);
 
   // Memoized filtered participants search across full dataset
   const filteredParticipants = useMemo(() => {
@@ -818,19 +903,23 @@ export default function AdminDashboardPage() {
     if (evt) {
       setEditingEventId(evt.id);
       setEventTitle(evt.title || "");
-      setEventCategory(evt.category || "Icebreaker Games");
+      setEventCategory(evt.category || "Esports Tournament");
       setEventStatus(evt.status || "live");
       setEventDescription(evt.description || "");
-      setEventVenue(evt.venue || "");
+      setEventVenue(evt.venue || evt.location || "");
       setEventDate(evt.date || "");
+      setEventFee(String(evt.fee ?? 0));
+      setEventOriginalFee(evt.originalFee !== undefined ? String(evt.originalFee) : "100");
     } else {
       setEditingEventId(null);
       setEventTitle("");
-      setEventCategory("Icebreaker Games");
+      setEventCategory("Esports Tournament");
       setEventStatus("live");
       setEventDescription("");
       setEventVenue("");
       setEventDate("");
+      setEventFee("0");
+      setEventOriginalFee("100");
     }
     setEventModalOpen(true);
   }, []);
@@ -844,6 +933,9 @@ export default function AdminDashboardPage() {
     setIsSavingEvent(true);
     try {
       const { doc, setDoc, updateDoc } = await import("firebase/firestore");
+      const feeNum = Number(eventFee) || 0;
+      const origFeeNum = eventOriginalFee !== "" ? Number(eventOriginalFee) : undefined;
+      const venueStr = eventVenue.trim();
 
       if (editingEventId) {
         await updateDoc(doc(db, "events", editingEventId), {
@@ -851,7 +943,10 @@ export default function AdminDashboardPage() {
           category: eventCategory,
           status: eventStatus,
           description: eventDescription.trim(),
-          venue: eventVenue.trim(),
+          venue: venueStr,
+          location: venueStr,
+          fee: feeNum,
+          originalFee: origFeeNum,
           date: eventDate,
           updatedAt: new Date().toISOString(),
         });
@@ -863,7 +958,10 @@ export default function AdminDashboardPage() {
           category: eventCategory,
           status: eventStatus,
           description: eventDescription.trim(),
-          venue: eventVenue.trim(),
+          venue: venueStr,
+          location: venueStr,
+          fee: feeNum,
+          originalFee: origFeeNum,
           date: eventDate,
           createdAt: new Date().toISOString(),
         });
@@ -876,7 +974,7 @@ export default function AdminDashboardPage() {
     } finally {
       setIsSavingEvent(false);
     }
-  }, [eventTitle, eventCategory, eventStatus, eventDescription, eventVenue, eventDate, editingEventId]);
+  }, [eventTitle, eventCategory, eventStatus, eventDescription, eventVenue, eventDate, eventFee, eventOriginalFee, editingEventId]);
 
   const handleToggleEventStatus = useCallback(async (evt: any) => {
     try {
@@ -887,6 +985,62 @@ export default function AdminDashboardPage() {
       console.error("Error updating event status:", err);
     }
   }, []);
+
+  const handleTogglePresence = useCallback(async (docId: string, currentPresence: boolean) => {
+    setTogglingPresenceId(docId);
+    try {
+      const { doc, updateDoc, serverTimestamp } = await import("firebase/firestore");
+      await updateDoc(doc(db, "event_registrations", docId), {
+        is_present: !currentPresence,
+        updated_at: serverTimestamp(),
+      });
+    } catch (err) {
+      console.error("Failed to update attendance status:", err);
+    } finally {
+      setTogglingPresenceId(null);
+    }
+  }, []);
+
+  const handleRemoveRegistrant = useCallback(async (docId: string) => {
+    if (!confirm("Remove this registrant? This will free up a seat.")) return;
+    setRemovingRegistrantId(docId);
+    try {
+      const { doc, deleteDoc } = await import("firebase/firestore");
+      await deleteDoc(doc(db, "event_registrations", docId));
+    } catch (err) {
+      console.error("Failed to remove registrant:", err);
+    } finally {
+      setRemovingRegistrantId(null);
+    }
+  }, []);
+
+  const handleExportCSV = useCallback((eventId: string) => {
+    const list = adminRegistrants[eventId] || [];
+    if (list.length === 0) {
+      alert("No registrants to export.");
+      return;
+    }
+    const eventTitle = eventsList.find((e) => e.id === eventId)?.title || "event";
+    const header = ["S.No", "Full Name", "Registration Number", "Email", "Phone", "Branch", "Attendance Status"];
+    const rows = list.map((r, i) => [
+      i + 1,
+      `"${r.full_name}"`,
+      `"${r.registration_number}"`,
+      `"${r.user_email}"`,
+      `"${r.phone || ""}"`,
+      `"${r.branch || ""}"`,
+      r.is_present ? "Present" : "Absent",
+    ]);
+
+    const csvContent = "data:text/csv;charset=utf-8," + [header.join(","), ...rows.map((e) => e.join(","))].join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `${eventTitle.replace(/[^a-zA-Z0-9]/g, "_")}_registrants.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, [adminRegistrants, eventsList]);
 
   const handleDeleteEvent = useCallback((evt: any) => {
     setConfirmModal({
@@ -1035,6 +1189,7 @@ export default function AdminDashboardPage() {
                 <option value="overview">📊 Overview</option>
                 <option value="leaderboard">🏆 Live Leaderboard ↗ (Opens New Tab)</option>
                 <option value="events">🎮 Manage Events</option>
+                <option value="proposals">📅 Future Proposals</option>
                 <option value="polls">📊 Manage Polls</option>
                 <option value="quizzes">🧠 Live Quiz Control</option>
                 <option value="users">👥 Participants</option>
@@ -1052,6 +1207,7 @@ export default function AdminDashboardPage() {
               { id: "overview", label: "📊 Overview" },
               { id: "leaderboard", label: "🏆 Live Leaderboard ↗", external: true },
               { id: "events", label: "🎮 Manage Events" },
+              { id: "proposals", label: "📅 Future Proposals" },
               { id: "polls", label: "📊 Manage Polls" },
               { id: "quizzes", label: "🧠 Live Quiz Control" },
               { id: "users", label: "👥 Participants" },
@@ -1253,9 +1409,9 @@ export default function AdminDashboardPage() {
             <div className="space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2">
                 <div>
-                  <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight m-0">Manage Events</h1>
+                  <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight m-0">Manage Events &amp; Tournaments</h1>
                   <p className="text-slate-400 text-xs font-semibold mt-1">
-                    View, create, edit, or update status of IceBreaking event activities.
+                    View, create, edit, manage capacity, and track attendance for IceBreaking &amp; VRGC events.
                   </p>
                 </div>
                 <button
@@ -1268,63 +1424,119 @@ export default function AdminDashboardPage() {
 
               <div className="grid gap-4">
                 {eventsList.length > 0 ? (
-                  eventsList.map((evt: any) => (
-                    <Card
-                      key={evt.id}
-                      className="bg-slate-950/80 border-slate-800/80 shadow-xl backdrop-blur-xl transition-colors hover:border-blue-500/40 p-4 sm:p-6"
-                    >
-                      <div className="flex flex-col sm:flex-row justify-between items-start gap-4">
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <Badge
-                              variant="outline"
-                              className="bg-blue-500/10 text-blue-400 border-blue-500/30 font-extrabold text-[10px] sm:text-[11px] px-2.5 py-0.5"
-                            >
-                              {evt.category || "General"}
-                            </Badge>
-                            <Badge
-                              className={
-                                evt.status === "live" || evt.status === "active"
-                                  ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 font-black text-[10px] sm:text-[11px]"
-                                  : "bg-slate-800 text-slate-400 border-slate-700 font-bold text-[10px] sm:text-[11px]"
-                              }
-                            >
-                              ● {(evt.status || "upcoming").toUpperCase()}
-                            </Badge>
-                          </div>
-                          <h3 className="m-0 text-base sm:text-xl font-black text-white">{evt.title}</h3>
-                          {evt.description && (
-                            <p className="m-0 text-slate-400 text-xs sm:text-sm leading-relaxed">{evt.description}</p>
-                          )}
-                          <div className="flex items-center gap-4 text-xs text-slate-300 font-semibold flex-wrap">
-                            {evt.date && <span>📅 {evt.date}</span>}
-                            {evt.venue && <span>📍 {evt.venue}</span>}
-                          </div>
-                        </div>
+                  eventsList.map((evt: any) => {
+                    const regCount = registrationCounts[evt.id] || 0;
+                    const seatsLeft = Math.max(0, SEAT_LIMIT - regCount);
+                    const fillPct = Math.min(100, (regCount / SEAT_LIMIT) * 100);
+                    const isFull = seatsLeft === 0;
+                    const hasOffer = evt.originalFee && evt.originalFee > (evt.fee ?? 0);
+                    const savings = hasOffer ? evt.originalFee - (evt.fee ?? 0) : 0;
+                    const discountPct = hasOffer ? Math.round((savings / evt.originalFee) * 100) : 0;
 
-                        <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
-                          <button
-                            onClick={() => handleToggleEventStatus(evt)}
-                            className="flex-1 sm:flex-none px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 font-bold text-xs transition-colors text-center cursor-pointer min-h-[44px]"
-                          >
-                            {evt.status === "live" || evt.status === "active" ? "Pause/Upcoming" : "Set Live"}
-                          </button>
-                          <button
-                            onClick={() => handleOpenEventModal(evt)}
-                            className="px-3 py-2 rounded-xl bg-blue-500/15 border border-blue-500/30 text-blue-300 hover:bg-blue-500/25 font-bold text-xs transition-colors cursor-pointer min-h-[44px]"
-                          >
-                            ✏️ Edit
-                          </button>
-                          <button
-                            onClick={() => handleDeleteEvent(evt)}
-                            className="px-3 py-2 rounded-xl bg-red-500/15 border border-red-500/30 text-red-300 hover:bg-red-500/25 font-bold text-xs transition-colors cursor-pointer min-h-[44px]"
-                          >
-                            🗑️ Delete
-                          </button>
+                    return (
+                      <Card
+                        key={evt.id}
+                        className="bg-slate-950/80 border-slate-800/80 shadow-xl backdrop-blur-xl transition-colors hover:border-violet-500/40 p-4 sm:p-6 space-y-4"
+                      >
+                        <div className="flex flex-col sm:flex-row justify-between items-start gap-4">
+                          <div className="space-y-2 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Badge
+                                variant="outline"
+                                className="bg-violet-500/10 text-violet-400 border-violet-500/30 font-extrabold text-[10px] sm:text-[11px] px-2.5 py-0.5"
+                              >
+                                {evt.category || "Tournament"}
+                              </Badge>
+                              <Badge
+                                className={
+                                  evt.status === "live" || evt.status === "active"
+                                    ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 font-black text-[10px] sm:text-[11px]"
+                                    : "bg-slate-800 text-slate-400 border-slate-700 font-bold text-[10px] sm:text-[11px]"
+                                }
+                              >
+                                ● {(evt.status || "upcoming").toUpperCase()}
+                              </Badge>
+
+                              {/* Price badge */}
+                              <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-emerald-950/40 border border-emerald-500/30 text-[10px] font-bold text-emerald-300">
+                                {hasOffer && (
+                                  <span className="text-slate-400 line-through text-[9px]">₹{evt.originalFee}</span>
+                                )}
+                                <span>{evt.fee === 0 || !evt.fee ? "FREE" : `₹${evt.fee}`}</span>
+                                {hasOffer && (
+                                  <span className="text-[9px] text-emerald-300 font-extrabold bg-emerald-500/20 px-1 rounded">
+                                    {discountPct}% OFF
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <h3 className="m-0 text-base sm:text-xl font-black text-white">{evt.title}</h3>
+                            {evt.description && (
+                              <p className="m-0 text-slate-400 text-xs sm:text-sm leading-relaxed">{evt.description}</p>
+                            )}
+                            <div className="flex items-center gap-4 text-xs text-slate-300 font-semibold flex-wrap">
+                              {evt.date && <span>📅 {evt.date}</span>}
+                              {(evt.venue || evt.location) && <span>📍 {evt.venue || evt.location}</span>}
+                            </div>
+
+                            {/* Capacity Progress Bar */}
+                            <div className="space-y-1.5 pt-1 max-w-md">
+                              <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
+                                <span>
+                                  Seats: <strong className="text-white">{regCount}</strong> / {SEAT_LIMIT}
+                                </span>
+                                <span className={seatsLeft <= 10 ? "text-rose-400 font-bold" : "text-amber-300"}>
+                                  {isFull ? "Full" : `${seatsLeft} seats left`}
+                                </span>
+                              </div>
+                              <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all duration-500 ${
+                                    isFull
+                                      ? "bg-rose-500"
+                                      : fillPct > 75
+                                      ? "bg-amber-500"
+                                      : "bg-gradient-to-r from-violet-500 to-cyan-400"
+                                  }`}
+                                  style={{ width: `${fillPct}%` }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Action Buttons */}
+                          <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap self-start">
+                            <button
+                              onClick={() => setAdminPanelEventId(evt.id)}
+                              className="px-3 py-2 rounded-xl bg-violet-600/20 border border-violet-500/40 text-violet-300 hover:bg-violet-600/30 font-bold text-xs transition-colors flex items-center gap-1.5 cursor-pointer min-h-[44px]"
+                            >
+                              <Users size={14} />
+                              Registrants ({regCount})
+                            </button>
+                            <button
+                              onClick={() => handleToggleEventStatus(evt)}
+                              className="flex-1 sm:flex-none px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 font-bold text-xs transition-colors text-center cursor-pointer min-h-[44px]"
+                            >
+                              {evt.status === "live" || evt.status === "active" ? "Pause/Upcoming" : "Set Live"}
+                            </button>
+                            <button
+                              onClick={() => handleOpenEventModal(evt)}
+                              className="px-3 py-2 rounded-xl bg-blue-500/15 border border-blue-500/30 text-blue-300 hover:bg-blue-500/25 font-bold text-xs transition-colors cursor-pointer min-h-[44px]"
+                            >
+                              ✏️ Edit
+                            </button>
+                            <button
+                              onClick={() => handleDeleteEvent(evt)}
+                              className="px-3 py-2 rounded-xl bg-red-500/15 border border-red-500/30 text-red-300 hover:bg-red-500/25 font-bold text-xs transition-colors cursor-pointer min-h-[44px]"
+                            >
+                              🗑️ Delete
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    </Card>
-                  ))
+                      </Card>
+                    );
+                  })
                 ) : (
                   <Card className="bg-slate-950/60 border-dashed border-slate-800 p-10 text-center">
                     <p style={{ color: "#94a3b8", fontSize: "1rem", margin: "0 0 16px" }}>No events found in database.</p>
@@ -1337,6 +1549,17 @@ export default function AdminDashboardPage() {
                   </Card>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* PROPOSALS & FACULTY DESK TAB */}
+          {activeTab === "proposals" && (
+            <div className="space-y-6">
+              <PlannedEvents
+                isAdmin={true}
+                userEmail={user?.email || undefined}
+                userName={user?.displayName || undefined}
+              />
             </div>
           )}
 
@@ -2439,11 +2662,11 @@ export default function AdminDashboardPage() {
 
                 <div>
                   <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "6px" }}>
-                    Scheduled Time
+                    Scheduled Time / Date
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. 2:00 PM - 3:30 PM"
+                    placeholder="e.g. 2:00 PM - 3:30 PM or 20-08-2026"
                     value={eventDate}
                     onChange={(e) => setEventDate(e.target.value)}
                     style={{
@@ -2455,6 +2678,56 @@ export default function AdminDashboardPage() {
                       color: "white",
                       fontSize: "0.9rem",
                       outline: "none",
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Pricing telemetry fields */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                <div>
+                  <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "6px" }}>
+                    List Price (₹ Original Fee)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    placeholder="e.g. 100"
+                    value={eventOriginalFee}
+                    onChange={(e) => setEventOriginalFee(e.target.value)}
+                    style={{
+                      width: "100%",
+                      padding: "10px 14px",
+                      background: "rgba(255, 255, 255, 0.05)",
+                      border: "1px solid rgba(255, 255, 255, 0.15)",
+                      borderRadius: "10px",
+                      color: "white",
+                      fontSize: "0.9rem",
+                      outline: "none",
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "6px" }}>
+                    Offer Price (₹ Charged)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    placeholder="0 (Free)"
+                    value={eventFee}
+                    onChange={(e) => setEventFee(e.target.value)}
+                    style={{
+                      width: "100%",
+                      padding: "10px 14px",
+                      background: "rgba(255, 255, 255, 0.05)",
+                      border: "1px solid rgba(255, 255, 255, 0.15)",
+                      borderRadius: "10px",
+                      color: "white",
+                      fontSize: "0.9rem",
+                      outline: "none",
+                      fontWeight: 700,
                     }}
                   />
                 </div>
@@ -2498,6 +2771,207 @@ export default function AdminDashboardPage() {
           </div>
         </div>
       )}
+
+      {/* REGISTRANT & ATTENDANCE DESK MODAL */}
+      {adminPanelEventId && (() => {
+        const allRegistrants = adminRegistrants[adminPanelEventId] || [];
+        const presentCount = allRegistrants.filter((r) => r.is_present).length;
+        const absentCount = allRegistrants.length - presentCount;
+
+        const q = registrantSearch.trim().toLowerCase();
+        let filtered = allRegistrants;
+
+        if (q) {
+          filtered = filtered.filter(
+            (r) =>
+              r.full_name.toLowerCase().includes(q) ||
+              r.user_email.toLowerCase().includes(q) ||
+              r.registration_number.toLowerCase().includes(q) ||
+              (r.phone && r.phone.includes(q))
+          );
+        }
+
+        if (presenceFilter === "Present") {
+          filtered = filtered.filter((r) => r.is_present);
+        } else if (presenceFilter === "Absent") {
+          filtered = filtered.filter((r) => !r.is_present);
+        }
+
+        const currentEvt = eventsList.find((e) => e.id === adminPanelEventId);
+
+        return (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-2xl flex items-center justify-center p-4 animate-in fade-in duration-300">
+            <div className="bg-[#0a0d18]/95 border border-violet-500/40 rounded-3xl max-w-2xl w-full p-6 sm:p-8 space-y-4 shadow-[0_25px_60px_rgba(0,0,0,0.9),0_0_50px_rgba(139,92,246,0.35)] relative max-h-[90vh] sm:max-h-[85vh] flex flex-col animate-in zoom-in-95 duration-300">
+              <button
+                onClick={() => {
+                  setAdminPanelEventId(null);
+                  setRegistrantSearch("");
+                  setPresenceFilter("All");
+                }}
+                className="absolute top-5 right-5 p-2 text-slate-400 hover:text-white rounded-full bg-white/5 hover:bg-rose-500/20 hover:text-rose-400 border border-white/10 hover:border-rose-500/30 transition-all cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+
+              <div className="space-y-1 shrink-0">
+                <div className="flex items-center justify-between pr-8">
+                  <span className="text-[10px] font-bold text-amber-400 uppercase tracking-widest">
+                    ADMIN — REGISTRANTS &amp; ATTENDANCE
+                  </span>
+                  <button
+                    onClick={() => handleExportCSV(adminPanelEventId)}
+                    className="px-3 py-1 rounded-xl bg-violet-600/30 hover:bg-violet-600/50 border border-violet-400/40 text-violet-300 text-[10px] font-bold transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer"
+                    title="Export participants to CSV file"
+                  >
+                    <Download size={12} />
+                    <span>Export CSV</span>
+                  </button>
+                </div>
+                <h3 className="text-xl sm:text-2xl font-black text-white leading-snug">
+                  {currentEvt?.title || "Event Roster"}
+                </h3>
+                <div className="flex items-center gap-3 text-xs text-slate-400 pt-0.5">
+                  <span>
+                    {allRegistrants.length}/{SEAT_LIMIT} registered
+                  </span>
+                  <span>•</span>
+                  <span className="text-emerald-400 font-bold">{presentCount} Present</span>
+                  <span>•</span>
+                  <span className="text-rose-400 font-bold">{absentCount} Absent</span>
+                </div>
+              </div>
+
+              {/* Search & Filter Bar */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shrink-0">
+                <div className="relative flex-1">
+                  <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
+                  <input
+                    type="text"
+                    placeholder="Search name, reg no, email…"
+                    value={registrantSearch}
+                    onChange={(e) => setRegistrantSearch(e.target.value)}
+                    className="w-full pl-10 pr-8 py-2.5 rounded-2xl bg-white/[0.04] border border-white/15 text-white text-xs placeholder-slate-500 focus:outline-none focus:border-violet-400 focus:bg-white/[0.08] focus:shadow-[0_0_20px_rgba(139,92,246,0.3)] transition-all font-medium"
+                  />
+                  {registrantSearch && (
+                    <button
+                      onClick={() => setRegistrantSearch("")}
+                      className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Attendance Filter Tabs */}
+                <div className="flex items-center bg-black/60 p-1.5 rounded-2xl border border-white/10 shrink-0">
+                  {(["All", "Present", "Absent"] as const).map((filterOpt) => {
+                    const isActive = presenceFilter === filterOpt;
+                    const badgeCount =
+                      filterOpt === "All"
+                        ? allRegistrants.length
+                        : filterOpt === "Present"
+                        ? presentCount
+                        : absentCount;
+                    return (
+                      <button
+                        key={filterOpt}
+                        onClick={() => setPresenceFilter(filterOpt)}
+                        className={`px-3.5 py-1.5 rounded-xl text-[10px] font-extrabold transition-all flex items-center gap-1.5 cursor-pointer ${
+                          isActive
+                            ? "bg-violet-600 text-white shadow-[0_0_12px_rgba(139,92,246,0.4)]"
+                            : "text-slate-400 hover:text-white hover:bg-white/5"
+                        }`}
+                      >
+                        <span>{filterOpt}</span>
+                        <span
+                          className={`px-1.5 py-0.2 rounded-full text-[9px] font-mono ${
+                            isActive ? "bg-white/20 text-white" : "bg-white/10 text-slate-400"
+                          }`}
+                        >
+                          {badgeCount}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Registrant List */}
+              <div className="flex-1 overflow-y-auto space-y-2.5 pr-1">
+                {allRegistrants.length === 0 ? (
+                  <div className="py-10 text-center text-slate-500 text-xs font-medium">No registrations yet.</div>
+                ) : filtered.length === 0 ? (
+                  <div className="py-10 text-center text-slate-500 text-xs font-medium">
+                    No registrants match the selected criteria.
+                  </div>
+                ) : (
+                  filtered.map((r, idx) => (
+                    <div
+                      key={r.docId}
+                      className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3.5 rounded-2xl border transition-all duration-200 ${
+                        r.is_present
+                          ? "bg-emerald-950/30 border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.15)]"
+                          : "bg-white/[0.03] border-white/10 hover:border-violet-500/40 hover:bg-violet-500/[0.05]"
+                      }`}
+                    >
+                      <div className="flex items-center gap-3.5 min-w-0">
+                        <span className="text-[10px] font-mono text-slate-500 w-5 shrink-0">#{idx + 1}</span>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <p className="text-xs sm:text-sm font-bold text-white truncate">{r.full_name}</p>
+                            {r.is_present && (
+                              <span className="px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[9px] font-extrabold uppercase tracking-wider flex items-center gap-1">
+                                <CheckSquare size={10} />
+                                Present
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-slate-400 truncate">{r.user_email}</p>
+                          <p className="text-[10px] font-mono text-violet-300">{r.registration_number}</p>
+                          {r.phone && <p className="text-[10px] text-slate-500 font-mono">{r.phone}</p>}
+                        </div>
+                      </div>
+
+                      {/* Action buttons: Present toggle & Remove */}
+                      <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+                        <button
+                          onClick={() => handleTogglePresence(r.docId, Boolean(r.is_present))}
+                          disabled={togglingPresenceId === r.docId}
+                          title={r.is_present ? "Mark as Absent" : "Mark as Present"}
+                          className={`px-3.5 py-2 rounded-xl text-[10px] font-extrabold transition-all duration-200 flex items-center gap-1.5 shadow-sm active:scale-95 disabled:opacity-50 cursor-pointer ${
+                            r.is_present
+                              ? "bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.25)]"
+                              : "bg-white/10 hover:bg-emerald-500/20 border border-white/20 hover:border-emerald-500/40 text-slate-300 hover:text-emerald-300"
+                          }`}
+                        >
+                          {r.is_present ? <CheckSquare size={13} /> : <Square size={13} />}
+                          <span>
+                            {togglingPresenceId === r.docId
+                              ? "Saving..."
+                              : r.is_present
+                              ? "Marked Present"
+                              : "Mark Present"}
+                          </span>
+                        </button>
+
+                        <button
+                          onClick={() => handleRemoveRegistrant(r.docId)}
+                          disabled={removingRegistrantId === r.docId}
+                          title="Remove registrant"
+                          className="px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 text-[10px] font-bold transition-all duration-200 flex items-center gap-1 disabled:opacity-50 active:scale-95 cursor-pointer"
+                        >
+                          <UserX size={13} />
+                          {removingRegistrantId === r.docId ? "Removing..." : "Remove"}
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* EDIT PARTICIPANT MODAL */}
       {participantModalOpen && (
