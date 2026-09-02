@@ -29,7 +29,10 @@ import {
   Zap,
   LogIn,
   Lock,
+  CreditCard,
 } from "lucide-react";
+import PaymentCard, { PaymentCardState } from "@/components/payments/PaymentCard";
+import { initiateRazorpayCheckout } from "@/lib/payments";
 
 const SEAT_LIMIT = 80;
 
@@ -128,6 +131,13 @@ export default function EventRegister({
   const [phone, setPhone] = useState<string>("");
   const [branch, setBranch] = useState<string>("");
 
+  // Payment portal state
+  const [isPaymentStep, setIsPaymentStep] = useState<boolean>(false);
+  const [paymentCardState, setPaymentCardState] = useState<PaymentCardState>("ready");
+  const [paymentErrorMessage, setPaymentErrorMessage] = useState<string | null>(null);
+  const [confirmedOrderId, setConfirmedOrderId] = useState<string | null>(null);
+  const [confirmedPaymentId, setConfirmedPaymentId] = useState<string | null>(null);
+
   useEffect(() => {
     if (currentUser?.displayName && !fullName) {
       setFullName(currentUser.displayName);
@@ -214,6 +224,11 @@ export default function EventRegister({
   // User: Open Registration Modal
   const handleOpenRegistrationModal = (evt: EventItem) => {
     setRegisteringEvent(evt);
+    setIsPaymentStep(false);
+    setPaymentCardState("ready");
+    setPaymentErrorMessage(null);
+    setConfirmedOrderId(null);
+    setConfirmedPaymentId(null);
     if (!fullName && currentUser?.displayName) {
       setFullName(currentUser.displayName);
     }
@@ -239,6 +254,20 @@ export default function EventRegister({
       return;
     }
 
+    if (typeof window !== "undefined") {
+      localStorage.setItem("ib_reg_number", targetRegNo);
+      localStorage.setItem("ib_full_name", fullName.trim());
+    }
+
+    // If event has a fee, transition to Cyberpunk Aurora Arena Payment Step
+    if (registeringEvent.fee > 0) {
+      setIsPaymentStep(true);
+      setPaymentCardState("ready");
+      setPaymentErrorMessage(null);
+      return;
+    }
+
+    // Free Event Registration (Instant, no gateway)
     setIsSubmittingReg(true);
     try {
       await addDoc(collection(db, "event_registrations"), {
@@ -250,14 +279,9 @@ export default function EventRegister({
         phone: phone.trim(),
         branch: branch.trim() || "General",
         registered_at: serverTimestamp(),
-        payment_status: registeringEvent.fee > 0 ? "Pending" : "Free",
+        payment_status: "Free",
         is_present: false,
       });
-
-      if (typeof window !== "undefined") {
-        localStorage.setItem("ib_reg_number", targetRegNo);
-        localStorage.setItem("ib_full_name", fullName.trim());
-      }
 
       setRegisterSuccess(`Successfully registered for ${registeringEvent.title}! See you at the arena!`);
       setRegisteringEvent(null);
@@ -267,6 +291,42 @@ export default function EventRegister({
     } finally {
       setIsSubmittingReg(false);
     }
+  };
+
+  // User: Execute Razorpay Checkout
+  const handleProceedToPay = async () => {
+    if (!registeringEvent || !currentUser) return;
+    const targetEmail = currentEmail || currentUser.email || `${regNo.toLowerCase()}@vitbhopal.ac.in`;
+    const targetRegNo = regNo.trim().toUpperCase();
+
+    setPaymentCardState("processing");
+    setPaymentErrorMessage(null);
+
+    await initiateRazorpayCheckout({
+      eventId: registeringEvent.id,
+      eventTitle: registeringEvent.title,
+      userEmail: targetEmail,
+      fullName: fullName.trim(),
+      registrationNumber: targetRegNo,
+      phone: phone.trim(),
+      branch: branch.trim() || "General",
+      onSuccess: (response) => {
+        setConfirmedOrderId(response.razorpay_order_id);
+        setConfirmedPaymentId(response.razorpay_payment_id);
+        setPaymentCardState("success");
+        setRegisteredEvents((prev) => ({ ...prev, [registeringEvent.id]: true }));
+      },
+      onDismiss: () => {
+        setPaymentCardState("cancelled");
+      },
+      onError: (msg) => {
+        setPaymentErrorMessage(msg);
+        setPaymentCardState("failed");
+      },
+      onProcessing: () => {
+        setPaymentCardState("processing");
+      },
+    });
   };
 
   // Filtered events
@@ -671,102 +731,138 @@ export default function EventRegister({
         </div>
       )}
 
-      {/* Modal: Student Event Registration Form */}
+      {/* Modal: Student Event Registration Form / Cyberpunk Arena Payment Portal */}
       {registeringEvent && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-2xl flex items-center justify-center p-4 animate-in fade-in duration-300">
-          <div className="bg-[#0a0d18]/95 border border-violet-500/40 rounded-3xl max-w-md w-full p-6 sm:p-8 space-y-5 shadow-[0_25px_60px_rgba(0,0,0,0.9),0_0_50px_rgba(139,92,246,0.35)] relative animate-in zoom-in-95 duration-300 max-h-[90vh] overflow-y-auto">
-            <button
-              onClick={() => setRegisteringEvent(null)}
-              className="absolute top-5 right-5 p-2 text-slate-400 hover:text-white rounded-full bg-white/5 hover:bg-rose-500/20 hover:text-rose-400 border border-white/10 hover:border-rose-500/30 transition-all cursor-pointer"
-            >
-              <X size={18} />
-            </button>
+          {isPaymentStep ? (
+            <PaymentCard
+              eventId={registeringEvent.id}
+              eventTitle={registeringEvent.title}
+              category={registeringEvent.category}
+              amount={registeringEvent.fee}
+              currency="INR"
+              fullName={fullName.trim()}
+              registrationNumber={regNo.trim().toUpperCase()}
+              userEmail={currentEmail || currentUser?.email || `${regNo.toLowerCase()}@vitbhopal.ac.in`}
+              phone={phone.trim()}
+              branch={branch.trim()}
+              initialState={paymentCardState}
+              errorMessage={paymentErrorMessage}
+              orderId={confirmedOrderId}
+              razorpayPaymentId={confirmedPaymentId}
+              onProceedToPay={handleProceedToPay}
+              onClose={() => setRegisteringEvent(null)}
+              onSuccessDone={() => {
+                setRegisterSuccess(`Payment verified! Registration confirmed for ${registeringEvent.title}! ✦`);
+                setRegisteringEvent(null);
+              }}
+            />
+          ) : (
+            <div className="bg-[#0a0d18]/95 border border-violet-500/40 rounded-3xl max-w-md w-full p-6 sm:p-8 space-y-5 shadow-[0_25px_60px_rgba(0,0,0,0.9),0_0_50px_rgba(139,92,246,0.35)] relative animate-in zoom-in-95 duration-300 max-h-[90vh] overflow-y-auto">
+              <button
+                onClick={() => setRegisteringEvent(null)}
+                className="absolute top-5 right-5 p-2 text-slate-400 hover:text-white rounded-full bg-white/5 hover:bg-rose-500/20 hover:text-rose-400 border border-white/10 hover:border-rose-500/30 transition-all cursor-pointer"
+              >
+                <X size={18} />
+              </button>
 
-            <div className="space-y-1.5">
-              <span className="text-[10px] font-bold text-violet-400 uppercase tracking-widest">
-                ✦ REGISTER FOR EVENT
-              </span>
-              <h3 className="text-xl sm:text-2xl font-black text-white leading-snug">{registeringEvent.title}</h3>
-              <p className="text-xs text-slate-400">
-                Official tournament registration for VIT Bhopal students.
-              </p>
-            </div>
-
-            <form onSubmit={handleConfirmRegistration} className="space-y-4 text-xs">
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1.5">Full Name *</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Abhinav Mishra"
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  className="w-full px-4 py-3 rounded-2xl bg-white/[0.04] border border-white/15 text-white placeholder-slate-500 focus:outline-none focus:border-violet-400 focus:bg-white/[0.08] focus:shadow-[0_0_20px_rgba(139,92,246,0.3)] transition-all font-medium"
-                />
+              <div className="space-y-1.5">
+                <span className="text-[10px] font-bold text-violet-400 uppercase tracking-widest">
+                  ✦ REGISTER FOR EVENT
+                </span>
+                <h3 className="text-xl sm:text-2xl font-black text-white leading-snug">{registeringEvent.title}</h3>
+                <p className="text-xs text-slate-400">
+                  Official tournament registration for VIT Bhopal students.
+                </p>
               </div>
 
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1.5">Registration Number *</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. 25BCY10254"
-                  value={regNo}
-                  onChange={(e) => setRegNo(e.target.value.toUpperCase())}
-                  className="w-full px-4 py-3 rounded-2xl bg-white/[0.04] border border-white/15 text-white font-mono placeholder-slate-500 focus:outline-none focus:border-violet-400 focus:bg-white/[0.08] focus:shadow-[0_0_20px_rgba(139,92,246,0.3)] uppercase transition-all font-medium"
-                />
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1.5">WhatsApp Phone Number *</label>
-                <input
-                  type="tel"
-                  required
-                  placeholder="e.g. 9876543210"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  className="w-full px-4 py-3 rounded-2xl bg-white/[0.04] border border-white/15 text-white placeholder-slate-500 focus:outline-none focus:border-violet-400 focus:bg-white/[0.08] focus:shadow-[0_0_20px_rgba(139,92,246,0.3)] transition-all font-medium"
-                />
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1.5">Branch / Specialization</label>
-                <input
-                  type="text"
-                  placeholder="e.g. CSE (Gaming), AI/ML, ECE..."
-                  value={branch}
-                  onChange={(e) => setBranch(e.target.value)}
-                  className="w-full px-4 py-3 rounded-2xl bg-white/[0.04] border border-white/15 text-white placeholder-slate-500 focus:outline-none focus:border-violet-400 focus:bg-white/[0.08] focus:shadow-[0_0_20px_rgba(139,92,246,0.3)] transition-all font-medium"
-                />
-              </div>
-
-              <div className="p-4 rounded-2xl bg-violet-500/10 border border-violet-500/30 space-y-1 backdrop-blur-md">
-                <div className="flex justify-between items-center text-xs font-bold text-white">
-                  <span>Entry Fee</span>
-                  <span className="text-amber-400 font-mono text-sm">
-                    {registeringEvent.fee === 0 ? "FREE" : `₹${registeringEvent.fee} INR`}
-                  </span>
+              <form onSubmit={handleConfirmRegistration} className="space-y-4 text-xs">
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1.5">Full Name *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Abhinav Mishra"
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    className="w-full px-4 py-3 rounded-2xl bg-white/[0.04] border border-white/15 text-white placeholder-slate-500 focus:outline-none focus:border-violet-400 focus:bg-white/[0.08] focus:shadow-[0_0_20px_rgba(139,92,246,0.3)] transition-all font-medium"
+                  />
                 </div>
-              </div>
 
-              <div className="pt-3 flex flex-col-reverse sm:flex-row sm:justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setRegisteringEvent(null)}
-                  className="w-full sm:w-auto px-5 py-3 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-bold transition-all active:scale-95 cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmittingReg}
-                  className="w-full sm:w-auto px-7 py-3 rounded-2xl bg-gradient-to-r from-violet-600 via-indigo-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white font-extrabold shadow-[0_0_24px_rgba(139,92,246,0.45)] transition-all flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
-                >
-                  {isSubmittingReg ? "Confirming..." : "Confirm Registration"}
-                </button>
-              </div>
-            </form>
-          </div>
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1.5">Registration Number *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. 25BCY10254"
+                    value={regNo}
+                    onChange={(e) => setRegNo(e.target.value.toUpperCase())}
+                    className="w-full px-4 py-3 rounded-2xl bg-white/[0.04] border border-white/15 text-white font-mono placeholder-slate-500 focus:outline-none focus:border-violet-400 focus:bg-white/[0.08] focus:shadow-[0_0_20px_rgba(139,92,246,0.3)] uppercase transition-all font-medium"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1.5">WhatsApp Phone Number *</label>
+                  <input
+                    type="tel"
+                    required
+                    placeholder="e.g. 9876543210"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    className="w-full px-4 py-3 rounded-2xl bg-white/[0.04] border border-white/15 text-white placeholder-slate-500 focus:outline-none focus:border-violet-400 focus:bg-white/[0.08] focus:shadow-[0_0_20px_rgba(139,92,246,0.3)] transition-all font-medium"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1.5">Branch / Specialization</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. CSE (Gaming), AI/ML, ECE..."
+                    value={branch}
+                    onChange={(e) => setBranch(e.target.value)}
+                    className="w-full px-4 py-3 rounded-2xl bg-white/[0.04] border border-white/15 text-white placeholder-slate-500 focus:outline-none focus:border-violet-400 focus:bg-white/[0.08] focus:shadow-[0_0_20px_rgba(139,92,246,0.3)] transition-all font-medium"
+                  />
+                </div>
+
+                <div className="p-4 rounded-2xl bg-violet-500/10 border border-violet-500/30 space-y-1 backdrop-blur-md">
+                  <div className="flex justify-between items-center text-xs font-bold text-white">
+                    <span>Entry Fee</span>
+                    <span className="text-amber-400 font-mono text-sm">
+                      {registeringEvent.fee === 0 ? "FREE" : `₹${registeringEvent.fee} INR`}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="pt-3 flex flex-col-reverse sm:flex-row sm:justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setRegisteringEvent(null)}
+                    className="w-full sm:w-auto px-5 py-3 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-bold transition-all active:scale-95 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  {registeringEvent.fee > 0 ? (
+                    <button
+                      type="submit"
+                      disabled={isSubmittingReg}
+                      className="w-full sm:w-auto px-7 py-3 rounded-2xl bg-gradient-to-r from-violet-600 via-indigo-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white font-extrabold shadow-[0_0_24px_rgba(139,92,246,0.45)] transition-all flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
+                    >
+                      <CreditCard size={14} className="text-yellow-300" />
+                      <span>Proceed to Payment (₹{registeringEvent.fee}) →</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="submit"
+                      disabled={isSubmittingReg}
+                      className="w-full sm:w-auto px-7 py-3 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-extrabold shadow-[0_0_24px_rgba(16,185,129,0.4)] transition-all flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
+                    >
+                      {isSubmittingReg ? "Confirming..." : "Confirm Free Registration"}
+                    </button>
+                  )}
+                </div>
+              </form>
+            </div>
+          )}
         </div>
       )}
     </div>

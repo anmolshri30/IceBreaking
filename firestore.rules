@@ -42,6 +42,22 @@ service cloud.firestore {
       allow read, write: if isAdmin();
     }
 
+    // Payments & Invoices Collection
+    // - Authenticated students can read only their own payments
+    // - Admins can read all payments and financial audit logs
+    // - Prevent client-side status tampering (Paid status must only be confirmed via server verification)
+    match /payments/{paymentId} {
+      allow read: if isAdmin() || (request.auth != null && resource.data.user_email == request.auth.token.email);
+      allow create: if request.auth != null || isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+
+      match /attempts/{attemptId} {
+        allow read: if isAdmin() || (request.auth != null && get(/databases/$(database)/documents/payments/$(paymentId)).data.user_email == request.auth.token.email);
+        allow write: if isAdmin();
+      }
+    }
+
     // Participants Collection (IceBreaking Main Arena)
     // Public read for leaderboard, authenticated create, admin update/delete
     match /participants/{participantId} {
